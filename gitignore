@@ -1,0 +1,24 @@
+# Node modules directory
+node_modules/
+
+# Environment variables file
+.env
+
+# Log files
+*.log
+
+# Directory for temporary files
+tmp/
+temp/
+
+# Build output
+dist/
+build/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
