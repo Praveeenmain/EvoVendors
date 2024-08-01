@@ -160,6 +160,25 @@ app.post('/verify-login', async (req, res) => {
     res.status(500).send({ error: error.message });
   }
 });
+app.get("/user/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const phoneNumberFromToken = req.user.phoneNumber;
+
+  try {
+    // Ensure the phone number in the token matches a verified user
+    const user = await db.collection('users').findOne({ _id: new ObjectId(id), phoneNumber: phoneNumberFromToken });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found or not authorized to access this information" });
+    }
+
+    res.status(200).json(user);
+  } catch (error) {
+    console.error("Error retrieving user details:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 
   app.post("/vendor/products", authenticateToken, async (req, res) => {
     const {
@@ -336,6 +355,7 @@ app.post('/verify-login', async (req, res) => {
     }
   });
   
+
   //servicePage
   app.post("/vendor/services", authenticateToken, async (req, res) => {
     const {
