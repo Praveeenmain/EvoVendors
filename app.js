@@ -50,42 +50,49 @@ function authenticateToken(req, res, next) {
 
 // Endpoint to initiate OTP verification for signup
 app.post('/signup', async (req, res) => {
-    const { phoneNumber, username } = req.body;
-  
-    try {
-      // Check if the phoneNumber already exists in the database
-      const existingUser = await db.collection('users').findOne({ phoneNumber });
-  
-      if (existingUser) {
-        // If user is already verified, send a message and do not send SMS
-        if (existingUser.status === 'verified') {
-          return res.status(400).send({ message: 'You have already signed up and are verified.' });
-        }
-  
-        // If user exists but is not verified, resend OTP
-        await client.verify.v2.services(verifySid)
-          .verifications.create({ to: phoneNumber, channel: 'sms' });
-  
-        return res.status(200).send({ status: 'OTP sent again for signup' });
+  const { phoneNumber, username, businessName, name, email } = req.body;
+
+  try {
+    // Check if the phoneNumber already exists in the database
+    const existingUser = await db.collection('users').findOne({ phoneNumber });
+
+    if (existingUser) {
+      // If user is already verified, send a message and do not send SMS
+      if (existingUser.status === 'verified') {
+        return res.status(400).send({ message: 'You have already signed up and are verified.' });
       }
-  
-      // If user does not exist, send OTP and store user data in the database
+
+      // If user exists but is not verified, resend OTP
       await client.verify.v2.services(verifySid)
         .verifications.create({ to: phoneNumber, channel: 'sms' });
-  
-      await db.collection('users').updateOne(
-        { phoneNumber },
-        { $set: { phoneNumber, username, status: 'pending' } },
-        { upsert: true }
-      );
-  
-      res.status(200).send({ status: 'OTP sent for signup' });
-    } catch (error) {
-      console.error('Error during signup:', error);
-      res.status(500).send({ error: error.message });
+
+      return res.status(200).send({ status: 'OTP sent again for signup' });
     }
+
+    // If user does not exist, send OTP and store user data in the database
+    await client.verify.v2.services(verifySid)
+      .verifications.create({ to: phoneNumber, channel: 'sms' });
+
+    await db.collection('users').updateOne(
+      { phoneNumber },
+      { $set: { 
+        phoneNumber, 
+        username, 
+        businessName, 
+        name, 
+        email, 
+        status: 'pending' 
+      }},
+      { upsert: true }
+    );
+
+    res.status(200).send({ status: 'OTP sent for signup' });
+  } catch (error) {
+    console.error('Error during signup:', error);
+    res.status(500).send({ error: error.message });
+  }
 });
-  
+
 
 // Endpoint to verify OTP and complete signup
 app.post('/verify-signup', async (req, res) => {
