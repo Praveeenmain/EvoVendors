@@ -8,6 +8,28 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const { connectToDb, getDb } = require('./db');
 
+
+
+const multer = require('multer');
+const path = require('path');
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, 'uploads/'); // Ensure this directory exists
+  },
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ storage: storage });
+const fs = require('fs');
+
+const uploadDir = 'uploads/';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
 // Use environment variables
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -187,8 +209,36 @@ app.get("/user/:id", authenticateToken, async (req, res) => {
 });
 
 
-  app.post("/vendor/products", authenticateToken, async (req, res) => {
-    const {
+app.post("/vendor/products", authenticateToken, upload.fields([{ name: 'images', maxCount: 5 }, { name: 'videos', maxCount: 2 }]), async (req, res) => {
+  console.log(req.files); // Log the uploaded files
+
+  const {
+    productName,
+    productDescription,
+    productCategory,
+    productSubcategory,
+    price,
+    stockAvailability,
+    productPolicies,
+  } = req.body;
+
+  const phoneNumberFromToken = req.user.phoneNumber;
+
+  try {
+    const user = await db.collection('users').findOne({ phoneNumber: phoneNumberFromToken, status: 'verified' });
+
+    if (!user) {
+      return res.status(400).json({ message: "User not registered or not verified" });
+    }
+
+    const images = req.files['images']?.map(file => file.path) || [];
+    const videos = req.files['videos']?.map(file => file.path) || [];
+
+    // Log the file paths to verify they are correct
+    console.log("Images:", images);
+    console.log("Videos:", videos);
+
+    const formData = {
       productName,
       productDescription,
       productCategory,
@@ -198,39 +248,17 @@ app.get("/user/:id", authenticateToken, async (req, res) => {
       productPolicies,
       images,
       videos,
-    } = req.body;
-  
-    const phoneNumberFromToken = req.user.phoneNumber;
-  
-    // Ensure the phone number in the token matches the phone number from the user
-    try {
-      const user = await db.collection('users').findOne({ phoneNumber: phoneNumberFromToken, status: 'verified' });
-  
-      if (!user) {
-        return res.status(400).json({ message: "User not registered or not verified" });
-      }
-  
-      const formData = {
-        productName,
-        productDescription,
-        productCategory,
-        productSubcategory,
-        price,
-        stockAvailability,
-        productPolicies,
-        images,
-        videos,
-        userId: user._id
-      };
-  
-      const collection = db.collection("products");
-      const result = await collection.insertOne(formData);
-      res.status(201).json({ message: "Product inserted successfully", productId: result.insertedId });
-    } catch (error) {
-      console.error("Error inserting product:", error);
-      res.status(500).json({ message: "Internal server error" });
-    }
-  });
+      userId: user._id
+    };
+
+    const collection = db.collection("products");
+    const result = await collection.insertOne(formData);
+    res.status(201).json({ message: "Product inserted successfully", productId: result.insertedId });
+  } catch (error) {
+    console.error("Error inserting product:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
   app.get("/vendor/products", authenticateToken, async (req, res) => {
     try {
       const phoneNumberFromToken = req.user.phoneNumber;
