@@ -1,34 +1,14 @@
 require('dotenv').config(); // Load environment variables from .env file
 
 const express = require('express');
-const { ObjectId } = require("mongodb");
+const { ObjectId } = require('mongodb');
 const bodyParser = require('body-parser');
 const twilio = require('twilio');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const { connectToDb, getDb } = require('./db');
-
-
-
 const multer = require('multer');
-const path = require('path');
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'uploads/'); // Ensure this directory exists
-  },
-  filename: function (req, file, cb) {
-    cb(null, Date.now() + path.extname(file.originalname));
-  }
-});
-
-const upload = multer({ storage: storage });
-const fs = require('fs');
-
-const uploadDir = 'uploads/';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+const { GridFSBucket } = require('mongodb');
 
 // Use environment variables
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
@@ -43,14 +23,16 @@ app.use(bodyParser.json());
 app.use(cors()); // Enable CORS
 
 let db;
+let gridFSBucket;
 
-// Connect to the database and start the server
+// Connect to the database and initialize GridFSBucket
 connectToDb((err) => {
   if (err) {
     console.error('Error connecting to database:', err);
     return;
   }
   db = getDb();
+  gridFSBucket = new GridFSBucket(db, { bucketName: 'uploads' }); // Initialize GridFSBucket
   app.listen(3001, () => {
     console.log('App is listening on port 3001');
   });
@@ -70,41 +52,35 @@ function authenticateToken(req, res, next) {
   });
 }
 
+// Initialize multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }, // Limit file size to 20MB
+});
+
 // Endpoint to initiate OTP verification for signup
 app.post('/signup', async (req, res) => {
   const { phoneNumber, username, businessName, name, email } = req.body;
 
   try {
-    // Check if the phoneNumber already exists in the database
     const existingUser = await db.collection('users').findOne({ phoneNumber });
 
     if (existingUser) {
-      // If user is already verified, send a message and do not send SMS
       if (existingUser.status === 'verified') {
         return res.status(400).send({ message: 'You have already signed up and are verified.' });
       }
 
-      // If user exists but is not verified, resend OTP
-      await client.verify.v2.services(verifySid)
-        .verifications.create({ to: phoneNumber, channel: 'sms' });
-
+      await client.verify.v2.services(verifySid).verifications.create({ to: phoneNumber, channel: 'sms' });
       return res.status(200).send({ status: 'OTP sent again for signup' });
     }
 
-    // If user does not exist, send OTP and store user data in the database
-    await client.verify.v2.services(verifySid)
-      .verifications.create({ to: phoneNumber, channel: 'sms' });
+    await client.verify.v2.services(verifySid).verifications.create({ to: phoneNumber, channel: 'sms' });
 
     await db.collection('users').updateOne(
       { phoneNumber },
-      { $set: { 
-        phoneNumber, 
-        username, 
-        businessName, 
-        name, 
-        email, 
-        status: 'pending' 
-      }},
+      {
+        $set: { phoneNumber, username, businessName, name, email, status: 'pending' },
+      },
       { upsert: true }
     );
 
@@ -115,19 +91,16 @@ app.post('/signup', async (req, res) => {
   }
 });
 
-
 // Endpoint to verify OTP and complete signup
 app.post('/verify-signup', async (req, res) => {
   const { phoneNumber, otpCode } = req.body;
 
   try {
-    const verification_check = await client.verify.v2
-      .services(verifySid)
-      .verificationChecks.create({ to: phoneNumber, code: otpCode });
+    const verification_check = await client.verify.v2.services(verifySid).verificationChecks.create({ to: phoneNumber, code: otpCode });
 
     if (verification_check.status === 'approved') {
       const result = await db.collection('users').updateOne(
-        { phoneNumber, status: 'pending' }, // Check for 'pending' status
+        { phoneNumber, status: 'pending' },
         { $set: { status: 'verified' } }
       );
 
@@ -135,8 +108,7 @@ app.post('/verify-signup', async (req, res) => {
         return res.status(400).send({ error: 'User not registered or already verified' });
       }
 
-      
-      res.status(200).send({ status: 'Signup successful'});
+      res.status(200).send({ status: 'Signup successful' });
     } else {
       res.status(400).send({ status: verification_check.status });
     }
@@ -153,8 +125,7 @@ app.post('/login', async (req, res) => {
     const user = await db.collection('users').findOne({ phoneNumber, status: 'verified' });
 
     if (user) {
-      await client.verify.v2.services(verifySid)
-        .verifications.create({ to: phoneNumber, channel: 'sms' });
+      await client.verify.v2.services(verifySid).verifications.create({ to: phoneNumber, channel: 'sms' });
       res.status(200).send({ status: 'OTP sent for login' });
     } else {
       res.status(400).send({ error: 'User not registered or not verified' });
@@ -169,9 +140,7 @@ app.post('/verify-login', async (req, res) => {
   const { phoneNumber, otpCode } = req.body;
 
   try {
-    const verification_check = await client.verify.v2
-      .services(verifySid)
-      .verificationChecks.create({ to: phoneNumber, code: otpCode });
+    const verification_check = await client.verify.v2.services(verifySid).verificationChecks.create({ to: phoneNumber, code: otpCode });
 
     if (verification_check.status === 'approved') {
       const user = await db.collection('users').findOne({ phoneNumber, status: 'verified' });
@@ -189,119 +158,110 @@ app.post('/verify-login', async (req, res) => {
     res.status(500).send({ error: error.message });
   }
 });
-app.get("/user/:id", authenticateToken, async (req, res) => {
+
+// Endpoint to get user details
+app.get('/user/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const phoneNumberFromToken = req.user.phoneNumber;
 
   try {
-    // Ensure the phone number in the token matches a verified user
     const user = await db.collection('users').findOne({ _id: new ObjectId(id), phoneNumber: phoneNumberFromToken });
 
     if (!user) {
-      return res.status(404).json({ message: "User not found or not authorized to access this information" });
+      return res.status(404).json({ message: 'User not found or not authorized to access this information' });
     }
 
     res.status(200).json(user);
   } catch (error) {
-    console.error("Error retrieving user details:", error);
-    res.status(500).json({ message: "Internal server error" });
+    console.error('Error retrieving user details:', error);
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
 
-
-app.post("/vendor/products", authenticateToken, upload.fields([{ name: 'images', maxCount: 5 }, { name: 'videos', maxCount: 2 }]), async (req, res) => {
-  console.log(req.files); // Log the uploaded files
-
-  const {
-    productName,
-    productDescription,
-    productCategory,
-    productSubcategory,
-    price,
-    stockAvailability,
-    productPolicies,
-  } = req.body;
-
-  const phoneNumberFromToken = req.user.phoneNumber;
-
-  try {
-    const user = await db.collection('users').findOne({ phoneNumber: phoneNumberFromToken, status: 'verified' });
-
-    if (!user) {
-      return res.status(400).json({ message: "User not registered or not verified" });
-    }
-
-    const images = req.files['images']?.map(file => file.path) || [];
-    const videos = req.files['videos']?.map(file => file.path) || [];
-
-    // Log the file paths to verify they are correct
-    console.log("Images:", images);
-    console.log("Videos:", videos);
-
-    const formData = {
+// Endpoint to upload products with images and videos
+// Endpoint to upload products with images and videos
+app.post('/vendor/products', authenticateToken, upload.array('files'), async (req, res) => {
+    const {
       productName,
       productDescription,
       productCategory,
       productSubcategory,
       price,
       stockAvailability,
-      productPolicies,
-      images,
-      videos,
-      userId: user._id
-    };
-
-    const collection = db.collection("products");
-    const result = await collection.insertOne(formData);
-    res.status(201).json({ message: "Product inserted successfully", productId: result.insertedId });
-  } catch (error) {
-    console.error("Error inserting product:", error);
-    res.status(500).json({ message: "Internal server error" });
-  }
-});
-  app.get("/vendor/products", authenticateToken, async (req, res) => {
+      productPolicies
+    } = req.body;
+  
+    const phoneNumberFromToken = req.user.phoneNumber;
+  
     try {
-      const phoneNumberFromToken = req.user.phoneNumber;
-      
-      // Ensure the phone number in the token matches the phone number from the user
       const user = await db.collection('users').findOne({ phoneNumber: phoneNumberFromToken, status: 'verified' });
-      
+  
       if (!user) {
-        return res.status(400).json({ message: "User not registered or not verified" });
+        return res.status(400).json({ message: 'User not registered or not verified' });
       }
-      
-      // Fetch products from the database
-      const products = await db.collection('products').find({ userId: user._id }).toArray();
-      res.status(200).json(products);
+  
+      // Upload files to GridFS
+      const files = req.files;
+      const imageFileIds = [];
+      const videoFileIds = [];
+  
+      for (const file of files) {
+        const uploadStream = gridFSBucket.openUploadStream(file.originalname, {
+          contentType: file.mimetype,
+          metadata: { userId: user._id }
+        });
+  
+        uploadStream.end(file.buffer);
+  
+        if (file.mimetype.startsWith('image/')) {
+          imageFileIds.push(uploadStream.id);
+        } else if (file.mimetype.startsWith('video/')) {
+          videoFileIds.push(uploadStream.id);
+        }
+      }
+  
+      const formData = {
+        productName,
+        productDescription,
+        productCategory,
+        productSubcategory,
+        price,
+        stockAvailability,
+        productPolicies,
+        images: imageFileIds, // Store image file IDs
+        videos: videoFileIds, // Store video file IDs
+        userId: user._id
+      };
+  
+      const collection = db.collection('products');
+      const result = await collection.insertOne(formData);
+      res.status(201).json({ message: 'Product inserted successfully', productId: result.insertedId });
     } catch (error) {
-      console.error("Error retrieving products:", error);
-      res.status(500).json({ message: "Internal server error" });
+      console.error('Error inserting product:', error);
+      res.status(500).json({ message: 'Internal server error' });
     }
   });
-  app.get("/vendor/products/:id", authenticateToken, async (req, res) => {
-    const { id } = req.params;
-    
+  
+
+// Endpoint to get products for a vendor
+app.get('/vendor/products', authenticateToken, async (req, res) => {
+    const phoneNumberFromToken = req.user.phoneNumber;
+  
     try {
-      const phoneNumberFromToken = req.user.phoneNumber;
-      
-      // Ensure the phone number in the token matches the phone number from the user
+      // Find the user based on the phone number from the token
       const user = await db.collection('users').findOne({ phoneNumber: phoneNumberFromToken, status: 'verified' });
-      
+  
       if (!user) {
-        return res.status(400).json({ message: "User not registered or not verified" });
+        return res.status(400).json({ message: 'User not registered or not verified' });
       }
-      
-      // Fetch the product from the database by ID
-      const product = await db.collection('products').findOne({ _id: new ObjectId(id), userId: user._id });
-      
-      if (!product) {
-        return res.status(404).json({ message: "Product not found" });
-      }
-      
-      res.status(200).json(product);
+  
+      // Retrieve products associated with the user
+      const products = await db.collection('products').find({ userId: user._id }).toArray();
+  
+      res.status(200).json(products);
     } catch (error) {
-      console.error("Error retrieving product:", error);
-      res.status(500).json({ message: "Internal server error" });
+      console.error('Error retrieving products:', error);
+      res.status(500).json({ message: 'Internal server error' });
     }
   });
   app.delete("/vendor/products/:id", authenticateToken, async (req, res) => {
@@ -389,10 +349,9 @@ app.post("/vendor/products", authenticateToken, upload.fields([{ name: 'images',
       res.status(500).json({ message: "Internal server error" });
     }
   });
-  
 
-  //servicePage
-  app.post("/vendor/services", authenticateToken, async (req, res) => {
+// Endpoint to upload services with images and videos
+app.post("/vendor/services", authenticateToken, upload.array('files'), async (req, res) => {
     const {
       serviceName,
       serviceCategory,
@@ -402,8 +361,6 @@ app.post("/vendor/products", authenticateToken, upload.fields([{ name: 'images',
       highestAmount,
       selectedServices,
       selectedEventTypes,
-      images,
-      videos,
     } = req.body;
   
     const phoneNumberFromToken = req.user.phoneNumber;
@@ -416,6 +373,26 @@ app.post("/vendor/products", authenticateToken, upload.fields([{ name: 'images',
         return res.status(400).json({ message: "User not registered or not verified" });
       }
   
+      // Upload files to GridFS
+      const files = req.files;
+      const imageFileIds = [];
+      const videoFileIds = [];
+  
+      for (const file of files) {
+        const uploadStream = gridFSBucket.openUploadStream(file.originalname, {
+          contentType: file.mimetype,
+          metadata: { userId: user._id }
+        });
+  
+        uploadStream.end(file.buffer);
+  
+        if (file.mimetype.startsWith('image/')) {
+          imageFileIds.push(uploadStream.id);
+        } else if (file.mimetype.startsWith('video/')) {
+          videoFileIds.push(uploadStream.id);
+        }
+      }
+  
       const formData = {
         serviceName,
         serviceCategory,
@@ -425,8 +402,8 @@ app.post("/vendor/products", authenticateToken, upload.fields([{ name: 'images',
         highestAmount,
         selectedServices,
         selectedEventTypes,
-        images,
-        videos,
+        images: imageFileIds, // Store image file IDs
+        videos: videoFileIds,  // Store video file IDs
         userId: user._id // Use the user's ID from the database
       };
   
@@ -439,6 +416,7 @@ app.post("/vendor/products", authenticateToken, upload.fields([{ name: 'images',
       res.status(500).json({ message: "Internal server error" });
     }
   });
+  
   app.get("/vendor/services", authenticateToken, async (req, res) => {
     const phoneNumberFromToken = req.user.phoneNumber;
   
@@ -574,6 +552,70 @@ app.post("/vendor/products", authenticateToken, upload.fields([{ name: 'images',
     } catch (error) {
       console.error("Error deleting service:", error);
       res.status(500).json({ message: "Internal server error" });
+    }
+  });
+  
+
+  // Endpoint to retrieve and display an image by fileId
+app.get('/image/:fileId', async (req, res) => {
+    const { fileId } = req.params;
+  
+    try {
+      const _id = new ObjectId(fileId);
+  
+      // Create a read stream from GridFS
+      const downloadStream = gridFSBucket.openDownloadStream(_id);
+  
+      // Handle stream events
+      downloadStream.on('data', (chunk) => {
+        res.write(chunk);
+      });
+  
+      downloadStream.on('error', (err) => {
+        console.error('Error streaming image:', err);
+        res.status(404).json({ message: 'Image not found' });
+      });
+  
+      downloadStream.on('end', () => {
+        res.end();
+      });
+  
+    } catch (error) {
+      console.error('Error retrieving image:', error);
+      res.status(500).json({ message: 'Internal server error' });
+    }
+  });
+  
+  // Endpoint to retrieve and display a video by fileId
+app.get('/video/:fileId', async (req, res) => {
+    const { fileId } = req.params;
+  
+    try {
+      const _id = new ObjectId(fileId);
+  
+      // Create a read stream from GridFS
+      const downloadStream = gridFSBucket.openDownloadStream(_id);
+  
+      // Set the appropriate content type for video
+      res.set('Content-Type', 'video/mp4'); // Adjust according to your video file type
+  
+      // Handle stream events
+      downloadStream.on('data', (chunk) => {
+        res.write(chunk);
+      });
+  
+      downloadStream.on('error', (err) => {
+        console.error('Error streaming video:', err);
+        res.status(404).json({ message: 'Video not found' });
+      });
+  
+      downloadStream.on('end', () => {
+        res.end();
+      });
+  
+    } catch (error) {
+      console.error('Error retrieving video:', error);
+      res.status(500).json({ message: 'Internal server error' });
     }
   });
   
