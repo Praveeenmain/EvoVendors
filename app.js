@@ -264,6 +264,32 @@ app.get('/vendor/products', authenticateToken, async (req, res) => {
       res.status(500).json({ message: 'Internal server error' });
     }
   });
+
+  app.get('/vendor/products/:id', authenticateToken, async (req, res) => {
+    const phoneNumberFromToken = req.user.phoneNumber;
+    const productId = req.params.id;
+
+    try {
+        // Find the user based on the phone number from the token
+        const user = await db.collection('users').findOne({ phoneNumber: phoneNumberFromToken, status: 'verified' });
+
+        if (!user) {
+            return res.status(400).json({ message: 'User not registered or not verified' });
+        }
+
+        // Retrieve the specific product by ID and user ID
+        const product = await db.collection('products').findOne({ _id: new ObjectId(productId), userId: user._id });
+
+        if (!product) {
+            return res.status(404).json({ message: 'Product not found' });
+        }
+
+        res.status(200).json(product);
+    } catch (error) {
+        console.error('Error retrieving product:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
   app.delete("/vendor/products/:id", authenticateToken, async (req, res) => {
     const { id } = req.params;
   
